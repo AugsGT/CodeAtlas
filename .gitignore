@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+*.egg-info/
+.pytest_cache/
+dashboard/node_modules/
+dashboard/dist/
+test_fixtures/
+.claude/
+.code_commenter/

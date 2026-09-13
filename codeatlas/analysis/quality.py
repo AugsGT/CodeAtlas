@@ -1,5 +1,17 @@
-# This file contains functions to analyze the quality of Python code using pyflakes.
-# Pyflakes checks for suspicious constructs and unresolved references in Python code.
+"""Static code-quality diagnostics via pyflakes - the "suspicious
+constructs" and "unresolved references" half of static analysis that
+PythonAstAnalyzer's own AST walk never attempted (it only extracts
+structure: modules/entities/calls/depends_on, plus whether a file parses
+at all).
+
+Reuses pyflakes rather than reimplementing its checks, per the project's
+own static-analysis language (spec: "Where static analyzers provide
+diagnostics, ingest them as issues"). pyflakes needs a full, valid AST,
+so this only ever runs against files that already parsed successfully -
+a file that doesn't parse at all already gets its own SyntaxError issue
+elsewhere (see graph/issues.py::generate_parse_error_issues) and has no tree
+to check further.
+"""
 
 import ast
 
@@ -8,9 +20,11 @@ from pyflakes.checker import Checker
 from .base import Diagnostic
 
 # Buckets chosen by likely runtime/correctness impact, not pyflakes' own
-# undifferentiated treatment of every check. For example, 'raise NotImplemented'
-# (RaiseNotImplemented) and 'assert (a, b)' (AssertTuple, always truthy)
-# are real bugs waiting to happen, so they're considered high severity.
+# undifferentiated treatment of every check - e.g. `raise NotImplemented`
+# (RaiseNotImplemented) or `assert (a, b)` (AssertTuple, always truthy)
+# are real bugs waiting to happen, not style nits, so they're HIGH here
+# even though pyflakes reports them the same way as an unused import.
+# Anything not explicitly listed defaults to "medium".
 _HIGH_SEVERITY_TYPES = frozenset({
     "UndefinedName", "UndefinedLocal", "UndefinedExport", "DuplicateArgument",
     "AssertTuple", "IfTuple", "RaiseNotImplemented",
@@ -32,23 +46,22 @@ _LOW_SEVERITY_TYPES = frozenset({
     "FStringMissingPlaceholders", "TStringMissingPlaceholders", "UnusedIndirectAssignment",
 })
 
+
 def _severity_for(type_name: str) -> str:
-    """Determine the severity level of a diagnostic type."""
     if type_name in _HIGH_SEVERITY_TYPES:
         return "high"
     if type_name in _LOW_SEVERITY_TYPES:
         return "low"
     return "medium"
 
-def check_source(tree: ast.AST, filename: str) -> list[Diagnostic]:
-    """Run pyflakes against an already-parsed AST. Returns a list of diagnostics.
-    
-    Args:
-        tree (ast.AST): The parsed abstract syntax tree of the Python code.
-        filename (str): The name of the file being checked.
 
-    Returns:
-        list[Diagnostic]: A list of diagnostic objects containing information about issues found in the code.
+def check_source(tree: ast.AST, filename: str) -> list[Diagnostic]:
+    """Run pyflakes against an already-parsed AST (the caller has
+    already parsed the file once for its own structural pass - reusing
+    that tree avoids parsing twice). Returns [] if pyflakes itself can't
+    process the tree, rather than raising - a quality-check failure
+    shouldn't block ingest of the structural facts that already
+    succeeded.
     """
     try:
         checker = Checker(tree, filename=filename)

@@ -1,4 +1,9 @@
-# In-memory representations of graph node kinds.
+"""In-memory representations of graph node kinds.
+
+These are the canonical objects the rest of the pipeline (static
+analyzer, telemetry ingestion, identity resolution) builds and passes
+to the repository, rather than raw dicts or positional kwargs.
+"""
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -6,83 +11,118 @@ from datetime import datetime
 
 @dataclass
 class Module:
-    # Represents a module in the codebase.
-    path: str  # Path to the module file.
-    name: str  # Name of the module.
-    language: str  # Programming language used in the module.
-    parse_error: str = ""  # Error message if parsing fails, empty otherwise.
-    abs_path: str = ""  # Canonical absolute path of the module.
+    path: str
+    name: str
+    language: str
+    # Set when the file exists but couldn't be parsed (e.g. a real syntax
+    # error) - the module is still recorded (with no entities/calls/
+    # depends_on, since none could be extracted) rather than silently
+    # disappearing from the graph, so a question about that specific file
+    # can surface "it doesn't even parse" instead of getting no evidence
+    # or, worse, evidence about some other file entirely.
+    parse_error: str = ""
+    # Canonical absolute path (see graph/paths.py::canonical_path_key),
+    # populated even for a module that failed to parse (the file itself
+    # still exists on disk). Lets the dashboard's file viewer read a
+    # module's real source without the caller needing to know or resupply
+    # whatever "repo root" was used at ingest time - the same
+    # root-independence reasoning as CodeEntity.abs_path.
+    abs_path: str = ""
 
 
 @dataclass
 class CodeEntity:
-    # Represents a code entity like a function or class.
-    id: str  # Unique identifier for the entity.
-    qualified_name: str  # Full name including module path.
-    name: str  # Name of the entity.
-    kind: str  # Type of entity (e.g., function, class).
-    module_path: str  # Path to the module containing this entity.
-    start_line: int  # Starting line number in the file.
-    end_line: int  # Ending line number in the file.
-    abs_path: str = ""  # Canonical absolute path of the entity's source file.
-    local_qualname: str = ""  # Qualified name without module prefix.
+    id: str
+    qualified_name: str
+    name: str
+    kind: str
+    module_path: str
+    start_line: int
+    end_line: int
+    # Runtime-identity matching fields, independent of whatever directory
+    # was treated as the analysis "repo root" (see graph/identity.py):
+    # abs_path is the canonical_path_key() of this entity's source file's
+    # real absolute path, and local_qualname is the qualified name *without*
+    # the module-dotted prefix (e.g. "Calculator.compute", matching
+    # OpenTelemetry's code.function attribute directly).
+    abs_path: str = ""
+    local_qualname: str = ""
 
 
 @dataclass
 class RuntimeSpan:
-    # Represents a span of execution captured during runtime tracing.
-    id: str  # Unique identifier for the span.
-    trace_id: str  # Identifier for the entire trace.
-    name: str  # Name of the operation or function.
-    start_time: datetime  # Start time of the span.
-    end_time: datetime  # End time of the span.
-    duration_ms: float  # Duration of the span in milliseconds.
-    status: str  # Status of the span (e.g., OK, ERROR).
-    error_message: str = ""  # Error message if the span failed.
-    return_value: str = ""  # Return value of the operation.
-    code_filepath: str = ""  # Path to the file where the operation occurred.
-    code_namespace: str = ""  # Namespace of the operation.
-    code_function: str = ""  # Name of the function or method.
-    code_lineno: int = 0  # Line number in the file.
+    id: str
+    trace_id: str
+    name: str
+    start_time: datetime
+    end_time: datetime
+    duration_ms: float
+    status: str
+    # Populated from the span's status description when status is ERROR
+    # (OpenTelemetry sets this automatically when an exception propagates
+    # out of a traced call), e.g. "NameError: name 'c' is not defined".
+    error_message: str = ""
+    # repr() of what the call returned, captured only on success (a
+    # bug that produces a wrong-but-not-crashing result raises no
+    # exception, so status/error_message alone can't surface it - this
+    # can). Empty if the call raised, or if it wasn't captured.
+    return_value: str = ""
+    # Identity attributes used to resolve this span back to a CodeEntity.
+    # Follow OpenTelemetry's "code.*" semantic conventions.
+    code_filepath: str = ""
+    code_namespace: str = ""
+    code_function: str = ""
+    code_lineno: int = 0
 
 
 @dataclass
 class Metric:
-    # Represents a metric collected during runtime tracing.
-    id: str  # Unique identifier for the metric.
-    name: str  # Name of the metric.
-    value: float  # Value of the metric.
-    unit: str  # Unit of measurement for the metric.
-    timestamp: datetime  # Timestamp when the metric was recorded.
-    code_filepath: str = ""  # Path to the file where the metric occurred.
-    code_namespace: str = ""  # Namespace of the metric.
-    code_function: str = ""  # Name of the function or method.
-    code_lineno: int = 0  # Line number in the file.
+    id: str
+    name: str
+    value: float
+    unit: str
+    timestamp: datetime
+    code_filepath: str = ""
+    code_namespace: str = ""
+    code_function: str = ""
+    code_lineno: int = 0
 
 
 @dataclass
 class Issue:
-    # Represents an issue found during analysis.
-    id: str  # Unique identifier for the issue.
-    type: str  # Type of issue (e.g., SyntaxError, UncaughtException).
-    severity: str  # Severity level of the issue.
-    detection_method: str  # Method used to detect the issue.
-    message: str  # Description of the issue.
-    file: str = ""  # File where the issue occurred.
-    line: int = 0  # Line number in the file.
-    status: str = "open"  # Status of the issue (e.g., open, resolved).
+    """A single, first-class representation of "something is wrong",
+    normalized from whichever raw signal found it (a Module's
+    parse_error, a failed/slow RuntimeSpan, an ERROR/WARN LogEntry, a
+    non-zero exit code, a timeout) so alerts, retrieval, and reasoning
+    all read one consistent shape instead of each having to know the
+    raw signals' different properties separately. See graph/issues.py
+    for how these get created.
+    """
+    id: str
+    type: str  # e.g. "SyntaxError", "UncaughtException", "SlowCall", "Timeout", "NonZeroExit"
+    severity: str  # "critical" | "high" | "medium" | "low" | "info"
+    # "static" (found by AST analysis, before anything ran) or "runtime"
+    # (found from RuntimeSpan/LogEntry/execution-outcome evidence).
+    # "telemetry" and "inferred" are reserved for future use (externally
+    # supplied OTLP telemetry currently isn't distinguished from
+    # CodeAtlas's own sandboxed execution at the RuntimeSpan level, and
+    # nothing yet produces LLM-inferred issues).
+    detection_method: str
+    message: str
+    file: str = ""
+    line: int = 0
+    status: str = "open"
 
 
 @dataclass
 class LogEntry:
-    # Represents a log entry captured during runtime tracing.
-    id: str  # Unique identifier for the log entry.
-    message: str  # Message of the log entry.
-    level: str  # Level of severity (e.g., INFO, ERROR).
-    timestamp: datetime  # Timestamp when the log entry was recorded.
-    trace_id: str = ""  # Identifier for the entire trace.
-    span_id: str = ""  # Identifier for the span within the trace.
-    code_filepath: str = ""  # Path to the file where the log occurred.
-    code_namespace: str = ""  # Namespace of the log.
-    code_function: str = ""  # Name of the function or method.
-    code_lineno: int = 0  # Line number in the file.
+    id: str
+    message: str
+    level: str
+    timestamp: datetime
+    trace_id: str = ""
+    span_id: str = ""
+    code_filepath: str = ""
+    code_namespace: str = ""
+    code_function: str = ""
+    code_lineno: int = 0

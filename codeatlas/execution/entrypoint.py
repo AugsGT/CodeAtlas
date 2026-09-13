@@ -1,40 +1,65 @@
-# This file helps find the main entry point and dependencies of a Python project.
-# It works with any repository layout, not just one specific structure.
+"""Repository-agnostic entry-point and dependency detection.
+
+Automatic execution must not assume `main.py`, `sample_repo`, a specific
+package name, or a specific directory layout. This module inspects an
+arbitrary Python repository and decides, deterministically, how it could
+be safely started — or reports clearly that it can't, per the project
+requirement to "report that clearly rather than pretending execution
+succeeded" instead of guessing.
+
+Detection order (most explicit/reliable first):
+
+  1. `[project.scripts]` in pyproject.toml (PEP 621 console scripts) — if
+     there is exactly one entry, its "module:function" target is the
+     entry point. Ambiguous (more than one) is reported, not guessed.
+  2. A `__main__.py` inside exactly one top-level package — runnable via
+     `python -m <package>`.
+  3. Exactly one top-level `*.py` file that has an
+     `if __name__ == "__main__":` guard (excluding `setup.py` and
+     `conftest.py`, which are tooling files, not application entry
+     points). More than one such candidate is ambiguous and reported
+     rather than picked arbitrarily.
+
+Dependency detection is separate and best-effort: requirements.txt and
+PEP 621 `[project.dependencies]` are supported; a Pipfile/poetry.lock is
+noted but not parsed (reported as an unsupported manifest so the caller
+can decide to run without installing anything rather than silently
+skipping dependencies with no explanation).
+"""
 
 import ast
 import os
 from dataclasses import dataclass, field
 
 try:
-    import tomllib  # For parsing pyproject.toml in Python < 3.11
-except ImportError:  # Fallback for older Python versions
+    import tomllib
+except ImportError:  # Python < 3.11 fallback, not expected given requires-python
     tomllib = None
 
-# Files and directories to exclude when searching for entry points or dependencies
 _EXCLUDED_ROOT_SCRIPTS = {"setup.py", "conftest.py"}
 _EXCLUDED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules", ".pytest_cache"}
 
 
 @dataclass
 class EntrypointResult:
-    found: bool  # Whether an entry point was found
-    module: str | None = None  # Module name if found, to run via `python -m <module>`
-    script_path: str | None = None  # Script path if found, to run via `python <script_path>`
-    callable_spec: tuple | None = None  # (module, function) if found, to import and call
-    source: str = ""  # Human-readable description of how the entry point was chosen
-    reason: str = ""  # Reason for not finding an entry point
+    found: bool
+    # Exactly one of these is set when found is True.
+    module: str | None = None          # run via `python -m <module>`
+    script_path: str | None = None     # run via `python <script_path>` (relative to repo_root)
+    callable_spec: tuple | None = None  # (module, function) run via import + call
+    source: str = ""    # human-readable description of how this was chosen
+    reason: str = ""    # populated when found is False: why nothing was chosen
 
 
 @dataclass
 class DependencyManifest:
-    kind: str  # Type of dependency manifest ("requirements_txt", "pyproject", "unsupported", or "none")
-    path: str | None = None  # Path to the manifest file, if applicable
-    requirements: list = field(default_factory=list)  # List of required packages
-    note: str = ""  # Note about unsupported manifests
+    kind: str  # "requirements_txt" | "pyproject" | "unsupported" | "none"
+    path: str | None = None       # relative to repo_root, when applicable
+    requirements: list = field(default_factory=list)
+    note: str = ""
 
 
 def _top_level_py_files(repo_root):
-    # Returns a sorted list of top-level Python files in the repository
     return sorted(
         f for f in os.listdir(repo_root)
         if f.endswith(".py") and os.path.isfile(os.path.join(repo_root, f))
@@ -42,7 +67,6 @@ def _top_level_py_files(repo_root):
 
 
 def _top_level_packages(repo_root):
-    # Returns a list of top-level packages in the repository
     packages = []
     for name in sorted(os.listdir(repo_root)):
         full = os.path.join(repo_root, name)
@@ -54,7 +78,6 @@ def _top_level_packages(repo_root):
 
 
 def _has_main_guard(filepath):
-    # Checks if a file has an `if __name__ == "__main__":` guard
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             source = f.read()
@@ -74,7 +97,15 @@ def _has_main_guard(filepath):
 
 
 def _top_level_syntax_errors(repo_root):
-    # Returns a dictionary of top-level scripts that couldn't be parsed
+    """Which top-level scripts couldn't even be parsed - a candidate with
+    a genuine `if __name__ == '__main__':` guard is still correctly
+    rejected by _has_main_guard if the file has a syntax error, since
+    there's no way to check for the guard (or run the file at all)
+    without a valid parse. Surfaced separately so the final "no entry
+    point found" reason can say WHY a file that looks runnable wasn't
+    picked, instead of just that nothing was - a real point of user
+    confusion when the only file in a repo has both a real syntax error
+    and a real __main__ guard below it."""
     errors = {}
     for filename in _top_level_py_files(repo_root):
         if filename in _EXCLUDED_ROOT_SCRIPTS:
@@ -91,7 +122,6 @@ def _top_level_syntax_errors(repo_root):
 
 
 def _detect_console_script(repo_root):
-    # Detects a console script defined in pyproject.toml
     pyproject_path = os.path.join(repo_root, "pyproject.toml")
     if not os.path.isfile(pyproject_path) or tomllib is None:
         return None, None
@@ -114,7 +144,6 @@ def _detect_console_script(repo_root):
 
 
 def detect_entrypoint(repo_root: str) -> EntrypointResult:
-    # Detects the entry point of a Python project
     repo_root = os.path.abspath(repo_root)
 
     callable_spec, scripts = _detect_console_script(repo_root)
@@ -184,7 +213,6 @@ def detect_entrypoint(repo_root: str) -> EntrypointResult:
 
 
 def detect_dependencies(repo_root: str) -> DependencyManifest:
-    # Detects the dependencies of a Python project
     repo_root = os.path.abspath(repo_root)
 
     requirements_path = os.path.join(repo_root, "requirements.txt")

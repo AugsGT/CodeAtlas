@@ -1,7 +1,12 @@
-# Orchestrates automatic execution of an arbitrary ingested repository:
-# detects an entry point, runs it inside the Docker sandbox, decodes whatever
-# telemetry it produced, and ingests that telemetry into the graph via the
-# existing (unmodified) identity-resolution pipeline.
+"""Orchestrates automatic execution of an arbitrary ingested repository:
+detect an entry point, run it inside the Docker sandbox, decode whatever
+telemetry it produced, and ingest that telemetry into the graph via the
+existing (unmodified) identity-resolution pipeline.
+
+This is the piece `/api/execute` calls. It deliberately does no static
+analysis itself - callers are expected to have already run `/api/ingest`
+for the same repo_root, exactly like the manual-instrumentation OTLP path.
+"""
 
 import shutil
 from dataclasses import dataclass, field
@@ -18,33 +23,33 @@ from .subprocess_sandbox import SubprocessExecutor
 
 @dataclass
 class ExecutionReport:
-    # Represents the result of an execution attempt.
-    success: bool  # Whether the execution was successful.
-    reason: str = ""  # Reason for failure if not successful.
-    isolation: str = ""  # Type of isolation used.
-    isolation_warning: str = ""  # Warning related to isolation.
-    entrypoint_source: str = ""  # Source of the detected entry point.
-    exit_code: int | None = None  # Exit code of the execution.
-    timed_out: bool = False  # Whether the execution timed out.
-    stdout: str = ""  # Standard output from the execution.
-    stderr: str = ""  # Standard error from the execution.
-    dependency_warning: str = ""  # Warning related to dependencies.
-    spans_captured: int = 0  # Number of spans captured.
-    spans_resolved: int = 0  # Number of spans resolved.
-    truncated: bool = False  # Whether the output was truncated.
-    otel_instrumentors_enabled: list = field(default_factory=list)  # List of enabled OTLP instrumentors.
-    crash: dict | None = None  # Information about any crashes.
+    success: bool
+    reason: str = ""
+    isolation: str = ""
+    isolation_warning: str = ""
+    entrypoint_source: str = ""
+    exit_code: int | None = None
+    timed_out: bool = False
+    stdout: str = ""
+    stderr: str = ""
+    dependency_warning: str = ""
+    spans_captured: int = 0
+    spans_resolved: int = 0
+    truncated: bool = False
+    otel_instrumentors_enabled: list = field(default_factory=list)
+    crash: dict | None = None
 
 
 def select_executor():
-    """Selects the appropriate executor for running a repository.
-    Prefers DockerExecutor if available, otherwise uses SubprocessExecutor."""
+    """Prefer the Docker sandbox (stronger isolation); fall back to the
+    subprocess executor - which still enforces a timeout and captures
+    everything, just with weaker guarantees - when Docker isn't running,
+    rather than making automatic execution entirely unavailable."""
     available, _ = docker_availability()
     return DockerExecutor() if available else SubprocessExecutor()
 
 
 def _decode_spans_file(path):
-    # Decodes spans from a file.
     spans = []
     with open(path, "rb") as f:
         for record in read_records(f):
@@ -53,10 +58,15 @@ def _decode_spans_file(path):
 
 
 def run_repository(repo, repo_root: str, executor=None) -> ExecutionReport:
-    """Detects an entry point, executes the repository in a sandbox,
-    and ingests the resulting telemetry into the graph.
-    
-    Clears prior runtime telemetry to ensure fresh data."""
+    """Detect an entry point, execute `repo_root` in the sandbox, and
+    ingest the resulting telemetry into `repo` (a GraphRepository already
+    populated by static analysis for the same repo_root).
+
+    Clears prior runtime telemetry first, same reasoning as the
+    hand-instrumented sample workload: a RuntimeSpan's id is fresh every
+    execution, so without clearing, evidence would be an ever-growing mix
+    of every past run instead of reflecting "what does the code do right
+    now."""
     executor = executor or select_executor()
     result = executor.run(repo_root)
 
@@ -101,8 +111,12 @@ def run_repository(repo, repo_root: str, executor=None) -> ExecutionReport:
 
 
 def _ingest_crash_log(repo, crash: dict):
-    """Ingests a crash log into the repository.
-    Stores it as a process-level LogEntry."""
+    """An uncaught exception that escaped the entry point entirely (as
+    opposed to one that failed inside a traced function, which already
+    shows up as an ERROR-status RuntimeSpan) - stored as a process-level
+    LogEntry with no code.* attributes, since it has no single owning
+    CodeEntity. It's still visible evidence, just not linked to a
+    specific function the way a span-level error is."""
     import datetime
     import uuid
 
@@ -116,8 +130,8 @@ def _ingest_crash_log(repo, crash: dict):
 
 
 def can_execute_automatically(repo_root: str) -> bool:
-    """Checks if the repository can be executed automatically.
-    Does not require Docker to be running."""
+    """Cheap check the dashboard/API can use before offering the
+    "execute" action at all - does not require Docker to be running."""
     return detect_entrypoint(repo_root).found
 
 

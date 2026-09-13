@@ -1,16 +1,36 @@
-# Kuzu graph schema for CodeAtlas.
+"""Kuzu graph schema for CodeAtlas.
 
-# The schema is applied incrementally, one build phase at a time, rather than declared all at once.
+The schema is applied incrementally, one build phase at a time, rather
+than declared all at once.
 
-# Phase 1 defined the static-analysis side of the graph: Module and CodeEntity nodes, and the CONTAINS, CALLS, and DEPENDS_ON relationships between them.
+Phase 1 defined the static-analysis side of the graph: Module and
+CodeEntity nodes, and the CONTAINS, CALLS, and DEPENDS_ON relationships
+between them.
 
-# Phase 2 adds the runtime-identity side: RuntimeSpan nodes and the PRODUCES relationship, which links a CodeEntity to the spans emitted by its executions.
+Phase 2 adds the runtime-identity side: RuntimeSpan nodes and the
+PRODUCES relationship, which links a CodeEntity to the spans emitted
+by its executions.
 
-# Phase 4 adds Metric and LogEntry nodes: RECORDS links a CodeEntity to a metric data point recorded from it, LOGS links a CodeEntity to a log entry resolved via its own code.* attributes, and EMITS links a RuntimeSpan to a log entry emitted during that span (the standard OpenTelemetry trace/log correlation, preferred over LOGS when both are available).
+Phase 4 adds Metric and LogEntry nodes: RECORDS links a CodeEntity to
+a metric data point recorded from it, LOGS links a CodeEntity to a log
+entry resolved via its own code.* attributes, and EMITS links a
+RuntimeSpan to a log entry emitted during that span (the standard
+OpenTelemetry trace/log correlation, preferred over LOGS when both are
+available).
 
-# CodeEntity's abs_path/local_qualname columns (added after initial launch) let runtime identity resolution match a span/metric/log back to its CodeEntity without needing to know which directory was treated as the analysis "repo root" — see graph/identity.py.
+CodeEntity's abs_path/local_qualname columns (added after initial
+launch) let runtime identity resolution match a span/metric/log back to
+its CodeEntity without needing to know which directory was treated as
+the analysis "repo root" — see graph/identity.py.
 
-# Issue is the unified representation of "something is wrong", added after real dashboard use showed that scattering issue facts across Module.parse_error/RuntimeSpan.status/LogEntry.level (each read by a different consumer) meant a static-only problem (a syntax error) was structurally invisible to the alert system, which only ever queried runtime evidence. FOUND_IN/AFFECTS/EVIDENCED_BY_SPAN/EVIDENCED_BY_LOG connect an Issue back to whatever it's about — see graph/issues.py.
+Issue is the unified representation of "something is wrong", added
+after real dashboard use showed that scattering issue facts across
+Module.parse_error/RuntimeSpan.status/LogEntry.level (each read by a
+different consumer) meant a static-only problem (a syntax error) was
+structurally invisible to the alert system, which only ever queried
+runtime evidence. FOUND_IN/AFFECTS/EVIDENCED_BY_SPAN/EVIDENCED_BY_LOG
+connect an Issue back to whatever it's about — see graph/issues.py.
+"""
 
 NODE_TABLES = {
     "Module": """

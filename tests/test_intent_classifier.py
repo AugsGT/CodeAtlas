@@ -1,6 +1,48 @@
 from codeatlas.reasoning.intent_classifier import IntentClassifier, KNOWN_INTENTS
 
 
+class _FakeWrongIntentClient:
+    """Always returns a structurally valid but wrong intent, regardless
+    of the question - stands in for the real failure mode (the model
+    picking module_dependencies for a "what's wrong" question) without
+    depending on the real LLM's actual behavior to reproduce it."""
+
+    def __init__(self, intent, target=""):
+        self.intent = intent
+        self.target = target
+
+    def generate(self, prompt, format=None, temperature=0.0):
+        return f'{{"intent": "{self.intent}", "target": "{self.target}"}}'
+
+
+def test_deterministic_backstop_overrides_a_wrong_intent_for_an_unambiguous_diagnosis_question():
+    """The original incident this project was built to fix: the model
+    picked module_dependencies for "what is wrong in tt.py" - a
+    structurally valid intent, so nothing before this caught it. This
+    reproduces that exact failure with a fake client forced to make the
+    same wrong choice, and confirms the deterministic keyword backstop
+    corrects it without depending on the real model getting it right."""
+    classifier = IntentClassifier(_FakeWrongIntentClient("module_dependencies", "tt.py"))
+    result = classifier.classify("what is wrong in tt.py?")
+    assert result.intent == "diagnosis"
+    assert result.target == "tt.py"  # the backstop only fixes intent, never invents a target
+
+
+def test_deterministic_backstop_does_not_override_a_non_diagnosis_question():
+    """A question that doesn't contain an unambiguous diagnosis phrase
+    must be left exactly as the model classified it - the backstop is a
+    narrow safety net, not a general override of the model's judgment."""
+    classifier = IntentClassifier(_FakeWrongIntentClient("module_dependencies", "pricing.py"))
+    result = classifier.classify("what modules does pricing.py depend on?")
+    assert result.intent == "module_dependencies"
+
+
+def test_deterministic_backstop_does_not_fight_the_model_when_it_already_agrees():
+    classifier = IntentClassifier(_FakeWrongIntentClient("diagnosis", "tt.py"))
+    result = classifier.classify("what is wrong in tt.py?")
+    assert result.intent == "diagnosis"
+
+
 def test_classifies_callers_question(ollama_client):
     classifier = IntentClassifier(ollama_client)
     result = classifier.classify("Who calls the add function?")

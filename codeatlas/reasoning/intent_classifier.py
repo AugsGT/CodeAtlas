@@ -1,9 +1,37 @@
 # This file contains a class that classifies natural-language questions into intents and extracts the entity/module name being asked about.
 
 import json
+import re
 from dataclasses import dataclass
 
 from .ollama_client import OllamaClient
+
+# Deterministic backstop for the exact failure mode this project was
+# originally built to fix: "what is wrong in tt.py" classified as
+# module_dependencies instead of diagnosis. Prompt wording alone (the
+# _INTENT_DESCRIPTIONS text above) has closed most of that gap, but
+# nothing previously stopped the model from picking a structurally
+# valid-but-wrong intent for an unambiguously diagnosis-shaped question.
+# Deliberately narrow - only the clearest phrasings match, so a
+# genuinely different, more nuanced question (e.g. "why does X import Y"
+# - about dependencies, not a problem) isn't second-guessed by a coarse
+# keyword match. This overrides the model's choice; it never invents a
+# target, so an untargeted match still goes through the same no-target
+# diagnosis fallback in pipeline.py (-> recent_errors) as before.
+_DIAGNOSIS_PHRASE_RE = re.compile(
+    r"what'?s wrong|what is wrong|"
+    r"why (?:is|does|did|isn'?t|doesn'?t|didn'?t)\b.{0,40}\b"
+    r"(?:fail|failing|failed|crash|crashing|crashed|break|breaking|broke|broken|error|bug)|"
+    r"what caused|what'?s causing|"
+    r"how (?:do i|to) fix|"
+    r"where'?s the bug|where is the bug|"
+    r"what'?s the bug|what is the bug",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_diagnosis_question(question: str) -> bool:
+    return bool(_DIAGNOSIS_PHRASE_RE.search(question))
 
 # List of known intents that can be classified
 KNOWN_INTENTS = [
@@ -99,5 +127,8 @@ class IntentClassifier:
                 target = data["target"].strip()
         except (json.JSONDecodeError, AttributeError):
             pass  # fall through to the safe defaults above
+
+        if intent != "diagnosis" and _looks_like_diagnosis_question(question):
+            intent = "diagnosis"
 
         return IntentClassification(intent=intent, target=target, raw_response=raw_response)

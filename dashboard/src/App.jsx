@@ -1,8 +1,211 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const API_BASE = "http://localhost:8000";
 const MAX_HISTORY_TURNS = 5;
 const SEVERITIES = ["critical", "high", "medium", "low", "info"];
+
+const GRAPH_WIDTH = 1000;
+const GRAPH_HEIGHT = 700;
+const MAX_LAYOUT_NODES = 600;
+const GRAPH_KIND_COLOR = { Module: "#6366f1", CodeEntity: "#0ea5e9" };
+const GRAPH_SEVERITY_COLOR = {
+  critical: "#dc2626", high: "#ea580c", medium: "#ca8a04", low: "#65a30d", info: "#0891b2",
+};
+
+// A plain force-directed layout (repulsion between every pair of nodes,
+// spring attraction along edges, weak centering gravity) - no charting
+// library, consistent with the rest of this dashboard staying
+// dependency-free (see the npm-registry-access note this project has
+// worked around elsewhere). Fine for the node counts an ingested repo
+// actually produces here; computeForceLayout's own caller caps how many
+// nodes it will ever lay out (see MAX_LAYOUT_NODES) rather than letting
+// this degrade silently on a very large repo.
+function computeForceLayout(nodes, edges, width, height) {
+  const positions = new Map();
+  nodes.forEach((n, i) => {
+    const angle = (i / Math.max(nodes.length, 1)) * Math.PI * 2;
+    positions.set(n.id, {
+      x: width / 2 + Math.cos(angle) * 150 + (Math.random() - 0.5) * 20,
+      y: height / 2 + Math.sin(angle) * 150 + (Math.random() - 0.5) * 20,
+      vx: 0,
+      vy: 0,
+    });
+  });
+
+  const iterations = nodes.length > 150 ? 120 : 250;
+  const REPULSION = 2200;
+  const SPRING_LENGTH = 70;
+  const SPRING_STRENGTH = 0.02;
+  const CENTER_STRENGTH = 0.01;
+  const DAMPING = 0.85;
+
+  for (let iter = 0; iter < iterations; iter++) {
+    for (let i = 0; i < nodes.length; i++) {
+      const a = positions.get(nodes[i].id);
+      for (let j = i + 1; j < nodes.length; j++) {
+        const b = positions.get(nodes[j].id);
+        let dx = a.x - b.x;
+        let dy = a.y - b.y;
+        const distSq = dx * dx + dy * dy || 0.01;
+        const dist = Math.sqrt(distSq);
+        const force = REPULSION / distSq;
+        dx /= dist;
+        dy /= dist;
+        a.vx += dx * force;
+        a.vy += dy * force;
+        b.vx -= dx * force;
+        b.vy -= dy * force;
+      }
+    }
+    for (const e of edges) {
+      const a = positions.get(e.source);
+      const b = positions.get(e.target);
+      if (!a || !b) continue;
+      let dx = b.x - a.x;
+      let dy = b.y - a.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+      const force = (dist - SPRING_LENGTH) * SPRING_STRENGTH;
+      dx /= dist;
+      dy /= dist;
+      a.vx += dx * force;
+      a.vy += dy * force;
+      b.vx -= dx * force;
+      b.vy -= dy * force;
+    }
+    for (const n of nodes) {
+      const p = positions.get(n.id);
+      p.vx += (width / 2 - p.x) * CENTER_STRENGTH;
+      p.vy += (height / 2 - p.y) * CENTER_STRENGTH;
+      p.vx *= DAMPING;
+      p.vy *= DAMPING;
+      p.x += p.vx;
+      p.y += p.vy;
+    }
+  }
+
+  return positions;
+}
+
+function GraphView({ graphData, loading, error, onAskAbout }) {
+  const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
+  const [selected, setSelected] = useState(null);
+  const dragRef = useRef(null);
+  const svgRef = useRef(null);
+
+  const layout = useMemo(() => {
+    if (!graphData || graphData.nodes.length === 0) return null;
+    if (graphData.nodes.length > MAX_LAYOUT_NODES) return "too-large";
+    return computeForceLayout(graphData.nodes, graphData.edges, GRAPH_WIDTH, GRAPH_HEIGHT);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [graphData]);
+
+  // React's onWheel prop is attached as a passive listener, so
+  // event.preventDefault() inside it silently fails (and logs a console
+  // error) - the browser scrolls the page underneath the zoom instead of
+  // just zooming. A real listener with {passive: false} is the only way
+  // to actually claim the wheel event. Re-attaches whenever the <svg>
+  // itself mounts/unmounts (layout flips between a real Map and
+  // null/"too-large"), since the ref target changes then.
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return undefined;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.1 : 0.9;
+      setTransform((t) => ({ ...t, scale: Math.min(4, Math.max(0.2, t.scale * factor)) }));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [layout]);
+
+  if (loading) return <p className="meta">Loading graph…</p>;
+  if (error) return <p className="error">{error}</p>;
+  if (!graphData || graphData.nodes.length === 0) {
+    return <p className="meta">No graph to show yet — ingest a repository first.</p>;
+  }
+  if (layout === "too-large") {
+    return (
+      <p className="meta">
+        This repository has {graphData.nodes.length} nodes — too many to lay out
+        interactively. Use the file tree and Issues browser instead.
+      </p>
+    );
+  }
+
+  const handleMouseDown = (e) => {
+    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: transform.x, origY: transform.y };
+  };
+  const handleMouseMove = (e) => {
+    if (!dragRef.current) return;
+    const dx = e.clientX - dragRef.current.startX;
+    const dy = e.clientY - dragRef.current.startY;
+    setTransform((t) => ({ ...t, x: dragRef.current.origX + dx, y: dragRef.current.origY + dy }));
+  };
+  const handleMouseUp = () => {
+    dragRef.current = null;
+  };
+
+  return (
+    <div className="graph-view">
+      <div className="graph-legend">
+        <span><span className="dot" style={{ background: GRAPH_KIND_COLOR.Module }} /> Module</span>
+        <span><span className="dot" style={{ background: GRAPH_KIND_COLOR.CodeEntity }} /> Function/Class</span>
+        {SEVERITIES.map((s) => (
+          <span key={s}><span className="dot" style={{ background: GRAPH_SEVERITY_COLOR[s] }} /> {s} issue</span>
+        ))}
+        <span className="meta">scroll to zoom · drag to pan · click a node to ask about it</span>
+      </div>
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}
+        className="graph-svg"
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+      >
+        <g transform={`translate(${transform.x},${transform.y}) scale(${transform.scale})`}>
+          {graphData.edges.map((e, i) => {
+            const a = layout.get(e.source);
+            const b = layout.get(e.target);
+            if (!a || !b) return null;
+            return (
+              <line
+                key={i}
+                x1={a.x}
+                y1={a.y}
+                x2={b.x}
+                y2={b.y}
+                className={`graph-edge graph-edge-${e.type.toLowerCase()}`}
+              />
+            );
+          })}
+          {graphData.nodes.map((n) => {
+            const p = layout.get(n.id);
+            if (!p) return null;
+            const radius = n.kind === "Module" ? 11 : 6;
+            const fill = n.severity ? GRAPH_SEVERITY_COLOR[n.severity] : GRAPH_KIND_COLOR[n.kind];
+            return (
+              <g
+                key={n.id}
+                transform={`translate(${p.x},${p.y})`}
+                className={"graph-node" + (selected === n.id ? " selected" : "")}
+                onClick={() => {
+                  setSelected(n.id);
+                  onAskAbout(n.path || n.label);
+                }}
+              >
+                <circle r={radius} fill={fill} />
+                <title>{n.label}{n.severity ? ` — ${n.severity} issue` : ""}</title>
+                <text x={radius + 3} y={4}>{n.label}</text>
+              </g>
+            );
+          })}
+        </g>
+      </svg>
+    </div>
+  );
+}
 
 function StatsBar({ stats }) {
   if (!stats) return null;
@@ -122,7 +325,7 @@ function AnalysisTrace({ turn }) {
   );
 }
 
-function ProposedFix({ detail, entityId, repoRoot }) {
+function ProposedFix({ detail, entityId, repoRoot, onApplied }) {
   const [validating, setValidating] = useState(false);
   const [fixCheck, setFixCheck] = useState(null);
   const [fixCheckError, setFixCheckError] = useState(null);
@@ -185,7 +388,13 @@ function ProposedFix({ detail, entityId, repoRoot }) {
         const body = await res.json();
         throw new Error(body.detail || `HTTP ${res.status}`);
       }
-      setApplyResult(await res.json());
+      const result = await res.json();
+      setApplyResult(result);
+      // /api/apply-fix now re-analyzes repo_root itself on a successful
+      // apply (see the route's own docstring) - the graph is already
+      // caught up by the time this response comes back, so the dashboard
+      // just needs to re-read it, not tell the user to re-ingest.
+      if (result.applied) onApplied?.(result.file);
     } catch (err) {
       setApplyError(err.message);
     } finally {
@@ -257,8 +466,8 @@ function ProposedFix({ detail, entityId, repoRoot }) {
           </strong>
           {applyResult.applied && (
             <p className="meta">
-              Original backed up to <code>{applyResult.backup_path}</code>. Re-ingest the
-              repository to refresh evidence against the updated source.
+              Original backed up to <code>{applyResult.backup_path}</code>. The graph has
+              been refreshed against the updated source automatically.
             </p>
           )}
         </div>
@@ -267,7 +476,7 @@ function ProposedFix({ detail, entityId, repoRoot }) {
   );
 }
 
-function ConversationTurn({ turn, repoRoot }) {
+function ConversationTurn({ turn, repoRoot, onFixApplied }) {
   const entityId = turn.resolved_target.kind === "entity" ? turn.resolved_target.id : null;
   return (
     <div className="turn">
@@ -282,7 +491,7 @@ function ConversationTurn({ turn, repoRoot }) {
         )}
       </p>
       <p className="answer">{turn.answer}</p>
-      <ProposedFix detail={turn.diagnosis_detail} entityId={entityId} repoRoot={repoRoot} />
+      <ProposedFix detail={turn.diagnosis_detail} entityId={entityId} repoRoot={repoRoot} onApplied={onFixApplied} />
       <ValidationBanner validation={turn.validation} />
       <AnalysisTrace turn={turn} />
       <details>
@@ -488,6 +697,10 @@ export default function App() {
   const [issuesLoading, setIssuesLoading] = useState(false);
   const [issueFilters, setIssueFilters] = useState({ severity: "", detection_method: "" });
 
+  const [graphData, setGraphData] = useState(null);
+  const [graphLoading, setGraphLoading] = useState(false);
+  const [graphError, setGraphError] = useState(null);
+
   const refreshStats = async () => {
     try {
       const res = await fetch(`${API_BASE}/api/stats`);
@@ -533,6 +746,20 @@ export default function App() {
     }
   };
 
+  const refreshGraph = async () => {
+    setGraphLoading(true);
+    setGraphError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/graph`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setGraphData(await res.json());
+    } catch (err) {
+      setGraphError(err.message);
+    } finally {
+      setGraphLoading(false);
+    }
+  };
+
   useEffect(() => {
     // refreshAlerts (like refreshIssues) triggers a server-side
     // sync_runtime_issues() as a side effect of /api/alerts -
@@ -566,6 +793,7 @@ export default function App() {
       }
       const body = await res.json();
       setParseErrors(body.parse_errors || []);
+      setGraphData(null); // stale after a fresh ingest - reloaded lazily if/when the Graph tab is opened
       await Promise.all([refreshStats(), refreshAlerts(), refreshModules(), refreshIssues()]);
     } catch (err) {
       setIngestError(err.message);
@@ -670,6 +898,19 @@ export default function App() {
     refreshIssues(newFilters);
   };
 
+  const handleFixApplied = async (fixedFile) => {
+    // /api/apply-fix already re-analyzed the repo server-side - this
+    // just catches the dashboard's own cached views up to that: the
+    // fixed issue should drop out of the Issues browser/stats, and the
+    // code viewer's inline highlighting for the touched file should
+    // reflect the new source, not the pre-fix snapshot it loaded.
+    await Promise.all([refreshStats(), refreshModules(), refreshIssues()]);
+    setGraphData(null);
+    if (selectedFile && selectedFile === fixedFile) {
+      await loadFile(selectedFile);
+    }
+  };
+
   const askAbout = (targetText) => {
     setQuestion(`What is wrong in ${targetText}?`);
   };
@@ -743,8 +984,18 @@ export default function App() {
             >
               Issues ({issueCount})
             </button>
+            <button
+              type="button"
+              className={"tab" + (centerView === "graph" ? " active" : "")}
+              onClick={() => {
+                setCenterView("graph");
+                if (!graphData) refreshGraph();
+              }}
+            >
+              Graph
+            </button>
           </div>
-          {centerView === "code" ? (
+          {centerView === "code" && (
             <CodeViewer
               path={selectedFile}
               content={fileContent}
@@ -753,7 +1004,8 @@ export default function App() {
               issues={fileIssues}
               onAskAbout={askAbout}
             />
-          ) : (
+          )}
+          {centerView === "issues" && (
             <IssuesBrowser
               issues={allIssues}
               loading={issuesLoading}
@@ -761,6 +1013,9 @@ export default function App() {
               onFilterChange={handleIssueFilterChange}
               onAskAbout={(issue) => askAbout(issue.file || issue.module_path || issue.message)}
             />
+          )}
+          {centerView === "graph" && (
+            <GraphView graphData={graphData} loading={graphLoading} error={graphError} onAskAbout={askAbout} />
           )}
         </main>
 
@@ -794,7 +1049,7 @@ export default function App() {
             {conversation.length > 0 && (
               <div className="conversation">
                 {conversation.map((turn, i) => (
-                  <ConversationTurn key={i} turn={turn} repoRoot={repoRoot} />
+                  <ConversationTurn key={i} turn={turn} repoRoot={repoRoot} onFixApplied={handleFixApplied} />
                 ))}
               </div>
             )}

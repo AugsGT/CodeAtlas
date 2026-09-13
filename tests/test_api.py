@@ -114,6 +114,25 @@ def test_issues_endpoint_filters_by_severity(tmp_path):
         assert no_match == []
 
 
+def test_graph_endpoint_serves_structural_nodes_and_edges(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "main.py").write_text("def add(a, b):\n    return a + b\n\n\ndef run():\n    return add(1, 2)\n")
+
+    app = create_app(str(tmp_path / "graph.db"))
+    with TestClient(app) as client:
+        client.post("/api/ingest", json={"repo_root": str(repo_dir)})
+
+        body = client.get("/api/graph").json()
+        node_ids = {n["id"] for n in body["nodes"]}
+        assert "module:main.py" in node_ids
+        assert "entity:main.py::add" in node_ids
+        assert "entity:main.py::run" in node_ids
+
+        edge_types = {(e["source"], e["target"], e["type"]) for e in body["edges"]}
+        assert ("entity:main.py::run", "entity:main.py::add", "CALLS") in edge_types
+
+
 def test_modules_and_file_endpoints_serve_ingested_source(tmp_path):
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
@@ -225,6 +244,63 @@ def test_apply_fix_end_to_end_via_api(tmp_path):
         new_content = (repo_dir / "main.py").read_text()
         assert "if b == 0" in new_content
         assert Path(body["backup_path"]).read_text() == original_content
+
+
+def test_apply_fix_refreshes_the_graph_so_a_second_fix_in_the_same_file_lands_correctly(tmp_path):
+    """Real bug: applying a fix used to leave the graph's CodeEntity line
+    ranges stale. If the fix changed the file's line count, a SECOND
+    apply-fix to a different entity in the SAME file - without an
+    explicit re-ingest in between - would patch using the old, now-wrong
+    line numbers and corrupt the file. /api/apply-fix now re-runs static
+    analysis after a successful apply so the next apply always sees
+    correct line ranges; this reproduces the exact two-functions-one-file
+    scenario end-to-end and asserts the final file content is exactly
+    what both fixes, applied correctly in sequence, should produce."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    original_content = (
+        "def first_broken(x):\n"
+        "    return x * 2\n"
+        "\n"
+        "\n"
+        "def second_broken(a, b):\n"
+        "    return a - b\n"
+    )
+    (repo_dir / "main.py").write_text(original_content)
+    app = create_app(str(tmp_path / "graph.db"))
+    with TestClient(app) as client:
+        client.post("/api/ingest", json={"repo_root": str(repo_dir)})
+
+        # Fixing first_broken grows it from 2 lines to 4, shifting
+        # second_broken's real position two lines further down than
+        # whatever was recorded at ingest time.
+        first_response = client.post("/api/apply-fix", json={
+            "repo_root": str(repo_dir),
+            "entity_id": "main.py::first_broken",
+            "improved_code": "def first_broken(x):\n    if x < 0:\n        return 0\n    return x * 2\n",
+        })
+        assert first_response.json()["applied"] is True
+
+        second_response = client.post("/api/apply-fix", json={
+            "repo_root": str(repo_dir),
+            "entity_id": "main.py::second_broken",
+            "improved_code": "def second_broken(a, b):\n    if b == 0:\n        return 0\n    return a - b\n",
+        })
+        assert second_response.json()["applied"] is True
+
+        final_content = (repo_dir / "main.py").read_text()
+        assert final_content == (
+            "def first_broken(x):\n"
+            "    if x < 0:\n"
+            "        return 0\n"
+            "    return x * 2\n"
+            "\n"
+            "\n"
+            "def second_broken(a, b):\n"
+            "    if b == 0:\n"
+            "        return 0\n"
+            "    return a - b\n"
+        )
 
 
 def test_apply_fix_rejects_missing_repo_root(tmp_path):

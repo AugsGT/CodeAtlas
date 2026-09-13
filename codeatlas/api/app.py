@@ -24,6 +24,7 @@ from ..graph.issues import sync_runtime_issues, write_static_issues
 from ..graph.repository import GraphRepository
 from ..reasoning.ollama_client import OllamaError
 from ..reasoning.pipeline import ReasoningPipeline
+from ..retrieval.graph_view import build_repo_graph
 from ..telemetry import otlp_receiver
 from ..validation.fix_cycle import apply_fix_to_repository, validate_fix
 from .schemas import ApplyFixRequest, AskRequest, IngestRequest, ValidateFixRequest
@@ -170,6 +171,17 @@ def create_app(db_path: str) -> FastAPI:
             found = [i for i in found if i["detection_method"] == detection_method]
         return {"issues": found}
 
+    @app.get("/api/graph")
+    def graph():
+        """The whole current structural graph (every Module/CodeEntity
+        and the CONTAINS/CALLS/DEPENDS_ON edges between them, with each
+        node annotated by the most severe Issue found on it) for the
+        dashboard's graph visualization panel - see retrieval/graph_view.py.
+        Unlike every other retrieval method, this isn't scoped to one
+        question's evidence; it's the full picture for whatever repo is
+        currently ingested."""
+        return build_repo_graph(app.state.repo)
+
     @app.get("/api/modules")
     def modules():
         """Every ingested Module - path/name/language/parse_error - for
@@ -297,10 +309,29 @@ def create_app(db_path: str) -> FastAPI:
         A deliberate, explicit action - the dashboard gates this behind
         its own separate confirmation, never triggered automatically by
         diagnosis or validation.
+
+        Re-runs static analysis over repo_root after a successful apply
+        (same as /api/ingest's static half, but leaving runtime telemetry
+        alone - the just-applied fix doesn't invalidate past execution
+        evidence, it just means it's due for a re-run). Without this, two
+        real problems followed from the same stale state: the issue just
+        fixed kept showing as open until a manual re-ingest, and every
+        OTHER entity in the same file kept the line numbers recorded at
+        the PREVIOUS ingest - if the fix changed the file's line count, a
+        second apply-fix to a different entity in that file would patch
+        the wrong lines using those stale numbers, silently corrupting
+        the file. Both are closed by simply keeping the graph in sync
+        with what was just written to disk.
         """
         if not os.path.isdir(request.repo_root):
             raise HTTPException(status_code=400, detail=f"repo_root does not exist: {request.repo_root}")
         result = apply_fix_to_repository(app.state.repo, request.repo_root, request.entity_id, request.improved_code)
+        if result.applied:
+            analysis = PythonAstAnalyzer().analyze(request.repo_root)
+            app.state.repo.clear_static_graph()
+            app.state.repo.clear_all_issues()
+            write_analysis_result(app.state.repo, analysis)
+            write_static_issues(app.state.repo, analysis)
         return {
             "applied": result.applied,
             "file": result.file,

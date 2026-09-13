@@ -1,0 +1,2 @@
+# codeatlas_identity_test_repo has no external dependencies - this file
+# exists only so dependency detection has something to find.

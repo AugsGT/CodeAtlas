@@ -8,21 +8,6 @@ retrieved graph evidence and validated against that evidence.
 Built in 9 phases; see `codeatlas/` subpackages for the pipeline stages
 (graph, analysis, telemetry, retrieval, reasoning, validation, api).
 
-## Development process
-
-Built through iterative pair-programming with [Claude Code](https://claude.com/claude-code)
-(Anthropic's AI coding agent). My role: set the direction and made the
-architectural calls (Docker sandbox with a subprocess fallback over
-bare execution, Kuzu over a general-purpose graph database,
-deterministic citation validation instead of a second LLM call, a
-local Ollama model over a hosted API), specified requirements and
-constraints at each stage, used the running dashboard myself to find
-real bugs the test suite missed (several are documented inline in
-commit history and code comments), and reviewed and directed every
-fix. Claude Code wrote most of the implementation and tests under that
-direction, iterating against my live feedback rather than a single
-one-shot spec.
-
 ## Setup
 
 Windows Command Prompt (cmd.exe) needs backslashes; bash/PowerShell accept forward slashes too.
